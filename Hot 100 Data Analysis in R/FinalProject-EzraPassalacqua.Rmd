@@ -1,0 +1,348 @@
+---
+title: "Investigating Trend Longevity of Popular Music"
+author: "Ezra Passalacqua"
+date: "12/13/2024"
+output:
+  pdf_document:
+    number_sections: true
+editor_options: 
+  chunk_output_type: console
+---
+```{r echo=FALSE, include=FALSE, message=FALSE}
+library(ggplot2)
+library(rjson)
+library(knitr)
+library(tseries)
+library(forecast)
+```
+
+# Overview
+
+The Billboard Hot 100 is a weekly ranking of popular music in the United States, combining record sales, radio play, and, more recently, streaming, to create a general metric of the relative popularity of music [2]. Billboard claims that the data represents over 90% of sales (tracked by the third-party tool Luminate), all streams on major streaming services, and radio play on the majority of major radio stations (categorized by the Nielsen Audio Ratings system, which weights airplay differently based on time of day). All of these statistics are combined using a proprietary system to obtain a ranking for each song. The charts are released every Tuesday online and Saturday in print (our data reflects the print publication dates, which have changed over time, but are consistent to one per week). Each chart covers the Friday two weeks prior through the previous Thursday [2]. 
+
+As the landscape of popular music continues to shift, claims about popular music trends continue to surface. The purpose of this analysis is to provide some clarity on two main questions. Primarily, we will analyze the "speed" of the Hot 100's progression. We wonder: is there an observable trend in the average amount of time songs spend on the Hot 100? By graphing and decomposing the Hot 100 time series, we are able to look for a general trend. We also are curious: is there is any truth to common pop culture terms like "song of the summer"? Does music popularity shift throughout the year? We will observe any seasonal cycles to gain some clarity on this. Lastly, to answer if this behavior can be modeled, we will test multiple time series models using both held out data and cross-validation to obtain a model for predicting future Hot 100 outcomes that accounts for both general trends and any present cycles.
+
+```{r echo=FALSE, include=FALSE, message=FALSE}
+#From RJson MODULE:https://www.rdocumentation.org/packages/rjson/versions/0.2.23
+
+  billboard.json <- fromJSON(file="allbillboarddata.json")
+```  
+
+```{r echo=FALSE, include=FALSE, message=FALSE}
+  billboard.df <- data.frame(date=c(),
+                             avg=c())
+  for (day in billboard.json){
+    date <- day$date
+    total.weeks <- 0
+    for (song in day$data){
+      total.weeks <- total.weeks + song$weeks_on_chart
+    }
+    billboard.df <- rbind(billboard.df, c(date, total.weeks / 100))
+  }
+  colnames(billboard.df) <- c("Date", "Average")
+  billboard.df[,2] <- as.numeric(billboard.df[,2])
+  billboard.df <- billboard.df[596:1117,]
+```
+
+# Data
+
+## Data Set Description
+
+This data set is a time series, with one outcome, "average" (described further below).
+
+To analyze the general longevity of the music on any given chart, I calculated this custom metric to be the sole outcome variable. Each song on the Hot 100 has a measure of how many weeks it has spent on the chart, including the current week. The "average" metric I have calculated averages the number of weeks spent on the chart between all 100 songs for each given week. Though it is not perfect, this gives a single number that represents how long the average song has spent on the chart.
+
+The original data was obtained from the git repository linked below [1]. Because the machine running this analysis was insufficient to run a large scale data set, I have pulled a collection of all Hot 100 data since January 3, 1970 through the publication on December 29, 1979. This totals 522 weeks of data.
+
+As described above, each date in the original data is associated with the top 100 songs of a given week. Though the written date of each chart can vary within the week over the data set, each date represents the data from the previous week, so we consider the data to be regularly spaced, and fit for a time series.
+
+There are no missing values in the series so nothing need be imputed.
+
+## Summary Statistics for Average
+```{r echo=FALSE, message=FALSE}
+  min <- c(5.09)
+  q1 <- c(6.29)
+  med <- c(6.98)
+  mean <- c(7.027)
+  q3 <- c(7.628)
+  max <- c(9.86)
+  summary.tbl <- cbind(min,q1,med,mean,q3,max)
+  kable(summary.tbl, 
+        col.names = c("Min.","1st Qu.","Median","Mean","3rd Qu.","Max."),
+        caption = "Summary Statistics for Average Length of Time on Hot 100")
+```
+
+## Plotting Data
+
+
+### Box Plot
+
+We can see by looking at this box plot that there is a singular outlier above, and the data is otherwise slightly right skewed. I chose to ignore this outlier, as it is unlikely to incentivise large changes in the model predictions due to the size of the data set.
+
+```{r echo=FALSE, message=FALSE, out.width="50%", out.height="50%", fig.align = 'center', fig.cap="Box Plot of Average Times on Chart Across Billboard Hot 100"}
+  boxplot(billboard.df$Average, main="Average Time on Billboard Hot 100", ylab="Average Weeks on Hot 100")
+```
+
+\newpage
+
+### Histogram
+
+Viewing the histogram, this right skewed distribution becomes even more apparent.
+
+```{r echo=FALSE, message=FALSE, out.width="50%", out.height="50%", fig.align = 'center', fig.cap="Histogram of Average Times on Chart Across Billboard Hot 100"}
+  hist(billboard.df$Average,
+     main="Histogram of Average Times on Chart Across Billboard Hot 100",
+     xlab="Average Billboard Hot 100 Time on Chart",
+     breaks=50
+)
+```
+
+
+```{r echo=FALSE, message=FALSE}
+  # Constructing time series
+  freq = 365.25/7
+  billboard.ts <- ts(billboard.df$Average, frequency=freq, start=0)
+```
+
+### Time Series Graph
+
+Observing this time series shows a general increase as time goes on, as well as possibly seasonal cycles, but no trend cycles. However, there is also a lot of noise that obscures these observations.
+
+```{r echo = FALSE, message = FALSE, out.width="50%", out.height="50%", fig.align = 'center', fig.cap="Average Number of Weeks on Hot 100 by Week"}
+  autoplot(billboard.ts) + ylab("Average Number of Weeks on Hot 100") + xlab("Years Since 1970")
+```
+
+\newpage
+
+### Time Series Decomposition
+
+The decomposition of the time series clearly shows the upward trend (which is additive) and a yearly seasonal cycle, peaking around the new year, around early January. Notably, there is also an observable trend cycle with an approximate 3 year period, beginning in 1962. However, this cycle is only observed twice, so the meaning is debatable.
+
+To better observe the seasonal cycle, a plot of the seasonal cycle from the first 3 years of the data set is shown below:
+
+```{r echo = FALSE, message = FALSE, out.width="50%", out.height="50%", fig.align = 'center', fig.cap="Components of Average Billboard Ranking"}
+  billboard.ts.components <- decompose(billboard.ts)
+  autoplot(billboard.ts.components)
+```
+
+```{r echo=FALSE, message=FALSE, out.width="50%", out.height="50%", fig.align = 'center', fig.cap="Seasonal Trend of Average Time on Hot 100"}
+  example.ts.components <- decompose(window(billboard.ts, start=0, end=3))
+  autoplot(example.ts.components$seasonal,
+           ylab = "Average Number of Weeks on Hot 100",
+           xlab = "Years Since 1970")
+```
+
+
+## Stationarity
+```{r echo=FALSE, message=FALSE}
+  # adf.test(billboard.ts)
+  # kpss.test(billboard.ts)
+```
+The execution of an Augmented Dickey-Fuller Test results in a rejection of the null hypothesis due to a p-value of 0.01 which concludes the series is stationary. The KPSS test results in a p-value of 0.01 which is significant causing is to reject the null hypothesis and conclude the series is non-stationary. Due to the outcomes of these tests, we conclude the series is not strict stationary.
+
+# Modeling This Series
+
+## Training and Test Sets
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+  train.ts <- window(billboard.ts, start=0, end=9)
+  test.ts <- window(billboard.ts, start=9, end=10)
+```
+For testing, my training set consists of my entire data set, minus the last year of data (this is 470 weeks or approximately 9 years. My testing set is the last year of data (52 weeks, 1 year).
+
+
+## Benchmarks
+
+### Average Model
+```{r echo=FALSE, message=FALSE}
+average.model <- meanf(train.ts, 1)
+```
+
+I started by getting a fit baseline using an average model to my data with a forecast horizon of 1 year. The residuals are shown below.
+
+```{r echo=FALSE, message = FALSE, warning = FALSE, out.width="50%", out.height="50%", fig.align = 'center', results='hide', fig.cap="Average Model Residuals"}
+checkresiduals(average.model)
+```
+
+The residuals can be seen to have the same trend as the original timeseries. We can still observe a general decrease followed by an increase and a seasonal cycle not picked up by the model. In addition, the correlogram shows an extremely high level of correlation in the residuals, and a histogram of the residuals follows the right skewed distribution. The Ljung-Box test shows a p-value < 2.2e-16, meaning extremely high correlation in residuals, which mirrors this data.
+
+This correlation is expected for our data set. For example, if the average time on the chart in a given week is high, meaning many songs have been on the Hot 100 for an extended period, the average of the previous week is necessarily high, as every song with a period greater than 1 must have been on the chart the previous week. By definition, this time series is autocorrelated.
+
+#### Evaluation Against Test Data
+```{r echo=FALSE, message=FALSE}
+average.model.accuracy <- accuracy(average.model, test.ts)
+kable(average.model.accuracy[,2:2], caption='Average Model RMSE on Training and Test Sets',
+      col.names = c("", "RMSE"))
+```
+
+This RMSE of about 1.449 on the test set is relatively large for the magnitude of values we are working with, and shows that the average baseline model does not fit the test set well.
+
+
+#### Cross-Validation
+
+```{r echo=FALSE, message=FALSE}
+average.model.cv <- tsCV(billboard.ts, forecastfunction=meanf, h=10)
+err.vec <- average.model.cv[,10]
+average.model.rmse <- sqrt(mean(err.vec^2, na.rm=TRUE))
+avg.cv.results <- matrix(average.model.rmse)
+kable(avg.cv.results, 
+      caption='Average Model RMSE from 10-Step Cross Validation',
+      col.names = c('RMSE from 10-Step Cross Validation'))
+```
+
+Using cross validation with a 10-step forecast horizon, we find that the RMSE is lower, but still relatively high compared to the magnitude of the data set, at about 0.943.
+
+### Seasonal Naive Model
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+naive.model <- snaive(train.ts, 1)
+```
+
+Because this data has a seasonal component, the next step I took was running a seasonal naive (random walk) model. This is the most basic model I can use that still somewhat accounts for the trends present in my time series.
+
+```{r echo=FALSE, message = FALSE, out.width="50%", out.height="50%", fig.align = 'center',  results='hide', fig.cap="Seasonal Naive Model Residuals", warning = FALSE}
+checkresiduals(naive.model)
+```
+
+The residuals here, at first glance, look much better. There is not an obvious visible trend in the residuals plot and the correlogram looks slightly more promising than the previous (average) model, with at least some residual values within the significance threshold. The histogram of the residuals also shows a much more normal distribution, with a mean around 0. However, even though the graphs appear to improve slightly, a Ljung-Box test, again results in a near-zero p-value (less than 2.2e-16). This means there is still a strong correlation in the residuals that the model is not picking up.
+
+#### Evaluation Against Test Data
+```{r echo=FALSE, message=FALSE}
+naive.model.accuracy <- accuracy(naive.model, test.ts)
+kable(naive.model.accuracy[,2:2], caption='Seasonal Naive Model RMSE on Training and Test Sets',
+      col.names = c("", "RMSE"))
+```
+
+This RMSE of about 1.44 on the test set is slightly smaller than our average model. However, it is still extremely large for the magnitude of our data set.
+
+#### Cross-Validation
+
+```{r echo=FALSE, message=FALSE}
+naive.model.cv <- tsCV(billboard.ts, forecastfunction=snaive, h=10)
+err.vec <- naive.model.cv[,10]
+naive.model.rmse <- sqrt(mean(err.vec^2, na.rm=TRUE))
+naive.cv.results <- matrix(naive.model.rmse)
+kable(naive.cv.results, 
+      caption='Seasonal Naive Model RMSE from 10-Step Cross Validation',
+      col.names = c('RMSE from 10-Step Cross Validation'))
+```
+
+Using cross validation with a 10-step forecast horizon, we find that the RMSE of about 0.843 is noticeably lower than the CV RMSE of the average model. However, it is still higher than ideal for our magnitude of data.
+
+
+## ARIMA Model 
+```{r echo=FALSE, message=FALSE}
+arima.model <- auto.arima(train.ts)
+```
+
+To more properly model the data through more complex processes, I chose the ARIMA model. I chose this model becuase it accounts for autocorrelation which is very much present in the current data set. The ARIMA function I am using automatically corrects for non-stationarity, so it is not needed to adjust for our series being not strict stationary.
+
+```{r echo=FALSE, message = FALSE, out.width="50%", out.height="50%", warning = FALSE, fig.align = 'center', results='hide', fig.cap="ARIMA Model Residuals"}
+checkresiduals(arima.model)
+```
+
+The residuals on this model look much more promising than the previous two. Not only does the plot look like mostly random noise, but the correlogram also seems to be completely random, with only a few lags above the significance threshold. Furthermore, the residuals histogram is approximately normal, with a mean around 0 (excluding outliers). A Ljung-Box test shows a higher, insignificant p-value of approximately 0.2, meaning, there is no observed correlation in the residuals, meaning no observable trends that are not being picked up.
+
+### Evaluation Against Test Data
+
+```{r echo=FALSE, message=FALSE}
+  arima.test <- Arima(test.ts, order=c(1,1,2), seasonal = c(0,0,1))
+  arima.model.accuracy <- accuracy(arima.test)
+  kable(arima.model.accuracy[,2], caption='ARIMA Model RMSE on Test Set',
+      col.names = c("ARIMA RMSE on Test Set"))
+```
+
+Here we can see the RMSE on the test set improving drastically, dropping to around 0.2389.
+
+### Cross-Validation
+
+```{r echo=FALSE, message=FALSE}
+  arimafxn <- function(x, h) {forecast(Arima(x, order=c(1,1,2),
+                                               seasonal=c(0,0,1)))}
+  arima.cv.results <- tsCV(billboard.ts, arimafxn, h=10)
+  err.vec <- arima.cv.results[,10]
+  arima.rmse.cv <- sqrt(mean(err.vec^2, na.rm=TRUE))
+  arima.rmse.mat <- matrix(c(arima.rmse.cv))
+  
+  #FOR KNITTING PURPOSES - UNCOMMENT AND COMMENT OUT CV CODE TO KNIT WITHOUT CROSS VALIDATION
+  #arima.rmse.mat <- matrix(c(0.5770741))
+  
+  kable(arima.rmse.mat, 
+      caption='ARIMA RMSE from 10-Step Cross Validation',
+      col.names = c('RMSE from 10-Step Cross Validation'))
+```
+
+Using cross validation with a 10-step forecast horizon, we see the RMSE is much improved over the other models, at about 0.577. While this is a drastic improvement over the average and random walk models, it is important to know that the range of our data is 4.77. Therefore, an RMSE of 0.577 is still relatively large compared to the data set.
+
+## Evaluating Predictive Ability
+The compiled RMSE values for all three models are shown below.
+
+```{r echo=FALSE, message=FALSE}
+  rmse.vals <- rbind(
+    c("Average", average.model.accuracy["Test set","RMSE"], avg.cv.results),
+    c("Naive", naive.model.accuracy["Test set","RMSE"], naive.cv.results),
+    c("ARIMA", arima.model.accuracy["Training set","RMSE"], arima.rmse.mat))
+
+  kable(rmse.vals, caption = "RMSE Values for All Tested Models Against Held Out Data and With 10-Step Cross
+        Validation",
+        col.names = c("Model", "Test Set RMSE", "Cross-Validation RMSE"),
+  )
+```
+
+Here, a noticeable drop in RMSE for both forms of testing can be observed from the Average to the Naive model, and again from the Naive to the ARIMA model.
+
+Though the RMSE of the ARIMA model is relatively large compared to the size of the data set, it is noticeably smaller than that of the Average and Naive models, both against the test set, and with cross-validation. Therefore, the ARIMA model is the best model used for predicting future data.
+
+## Variable Importances
+Becuase this is a single variable time series, time is considered to be the sole predictor. Therefore, we can not rank the importance of predictors in this model.
+
+\newpage
+
+## Modeling Future Behavior
+It is important to note that the predictions from this model should not be used to determine anything more than what goes into the "average" metric. In other words, the predictions from any model on this data set should only serve to predict general trends in length of time on the Hot 100.
+
+This plot, shown below, uses the ARIMA model to predict the next year (52 weeks) of chart progression. Below is the predicted values for the first 5 weeks of 1980.
+
+```{r echo=FALSE, message=FALSE}
+  arima.forecast.model <- Arima(billboard.ts, order=c(1,1,2),
+                                seasonal=c(0, 0, 1))
+  arima.forecasts <- forecast(arima.forecast.model, h=52)
+```
+
+```{r echo = FALSE, message = FALSE, out.width="50%", out.height="50%", fig.align = 'center', fig.cap="ARIMA Forecasts for One Year."}
+autoplot(arima.forecasts,
+         ylab = "Average Billboard Hot 100 Time on Chart",
+         xlab = "Years Since 1970")
+```
+
+```{r echo=FALSE, message=FALSE}
+  preds.tbl <- arima.forecasts$mean[1:5]
+  weeks <- c(1,2,3,4,5)
+  kable(cbind(weeks,preds.tbl), 
+        col.names = c("Week of 1980", "Mean ARIMA Prediction"),
+        caption = "Predicted Amount of Time on Hot 100 for First 5 Weeks of 1980")
+```
+
+# Conclusion
+
+To answer if the "speed" of pop music is changing (at least along the time period of our data set), we look back to the time series decomposition. The additive underlying trend dictates that, on average, the time a song spent on the Hot 100 was increasing from 1970-1980.
+
+The same decomposition also showed us that there is an underlying seasonal trend where the most popular songs peak in early January.
+
+Lastly, by fitting the Arima model to the data, we are able to predict with a reasonable accuracy the average time on the Hot 100 for the year of 1980.
+
+\newpage
+
+# References
+
+[1] Billboard Hot 100 Data (mhollingshead on GitHub)
+
+https://github.com/mhollingshead/billboard-hot-100
+
+
+[2] Billboard Hot 100 Legend
+
+https://www.billboard.com/billboard-charts-legend/
+
+
+
